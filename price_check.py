@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Amazon SP-API 価格確認ツール (ISOGO SHOP) - クラウド実行版
+
+GitHub Actions 上で毎日自動実行されます。
+asins.txt に書かれた ASIN について、Amazon.co.jp の新品オファー価格を取得し、
+results フォルダに CSV で保存します。Python 標準ライブラリのみで動作します。
+
+認証情報は環境変数から読みます（GitHub Secrets に登録した値が渡されます）。
+  SPAPI_CLIENT_ID / SPAPI_CLIENT_SECRET / SPAPI_REFRESH_TOKEN
+"""
+
 import csv
 import json
 import os
@@ -15,7 +26,7 @@ BASE = Path(__file__).resolve().parent
 JST = timezone(timedelta(hours=9))
 TOKEN_URL = "https://api.amazon.co.jp/auth/o2/token"
 API_HOST = "https://sellingpartnerapi-fe.amazon.com"
-MARKETPLACE_ID = "A1VC38T7YXB528"
+MARKETPLACE_ID = "A1VC38T7YXB528"  # Amazon.co.jp
 
 
 def load_config():
@@ -26,7 +37,11 @@ def load_config():
     }
     missing = [k for k, v in cfg.items() if not v]
     if missing:
-        sys.exit("環境変数が未設定です: " + ", ".join(missing))
+        sys.exit(
+            "環境変数が未設定です: "
+            + ", ".join(missing)
+            + "（GitHub の Settings > Secrets and variables > Actions に登録してください）"
+        )
     return cfg
 
 
@@ -68,8 +83,19 @@ def get_offers(token, asin):
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
+    # 429（レート制限）/503 のときは間隔を空けて最大3回まで再試行する
+    wait = 10
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and attempt < 3:
+                print(f"    HTTP {e.code} のため {wait} 秒待って再試行します")
+                time.sleep(wait)
+                wait *= 2
+                continue
+            raise
 
 
 def summarize(payload):
@@ -128,7 +154,7 @@ def main():
     rows = []
     for i, asin in enumerate(asins):
         if i > 0:
-            time.sleep(2.1)
+            time.sleep(2.6)  # getItemOffers のレート制限 (0.5 req/s) に合わせる
         try:
             payload = get_offers(token, asin)
             s = summarize(payload)
@@ -155,7 +181,7 @@ def main():
                 }
             )
             print(f"  {asin}: エラー HTTP {e.code}")
-        except Exception as e:
+        except Exception as e:  # 個別の失敗で全体を止めない
             rows.append(
                 {
                     "asin": asin,
@@ -177,7 +203,7 @@ def main():
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
             w.writerows(rows)
-    print("完了")
+    print(f"完了: results/prices-{stamp}.csv と results/prices-latest.csv に保存しました。")
 
 
 if __name__ == "__main__":
